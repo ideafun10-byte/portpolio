@@ -1,0 +1,2 @@
+hangulpy==1.5.2
+rapidfuzz==3.14.3
