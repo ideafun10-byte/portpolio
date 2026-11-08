@@ -51,7 +51,7 @@ def prepare_data(df : pd.DataFrame) -> pd.DataFrame :
         print("표에 날짜 형식이 존재하지 않음") 
     else:
         year_month= date.pop() #수정
-        df[year_month] =
+        df[year_month] = pd.to_datetime(df[year_month],format = "%Y%m",errors="coerce") #%Y-%m,%Y%m%d
 
 
 
