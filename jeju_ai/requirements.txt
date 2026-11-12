@@ -1,5 +1,7 @@
-streamlit
+streamlit==1.66.1
 pandas
-google-genai>=2.34
-python-dotenv
-pytest
+google-genai==2.34.0   # Gemini API
+python-dotenv==1.2.3   # .env 파일 읽기
+altair==6.3.0          
+openpyxl==3.1.5        # scripts/convert_raw.py의 xlsx 읽기
+pytest==9.1.1 

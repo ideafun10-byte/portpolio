@@ -23,7 +23,7 @@ def prepare_data(df : pd.DataFrame) -> pd.DataFrame :
 
     #컬럼 내용 전처리
     for col in text_cols:
-        df[col] = df[col].strip()
+        df[col] = df[col].str.strip()
         df[col] = df[col].replace(r"[\ufeff\u200b-\u200d]", "", regex=True) 
         df[col] = df[col].replace(r"[\xa0\u3000]", " ", regex=True)
         df[col] = df[col].str.normalize("NFC")
@@ -111,8 +111,11 @@ def prepare_data(df : pd.DataFrame) -> pd.DataFrame :
             if date_index == -1:
                 print(f"{date_cadidate} 컬럼은 날짜 관련 열이 아닙니다")
             else:
-                 df[date_cadidate] = pd.to_datetime(df[date_cadidate],format = FORMATS_BY_LEN[date_len][date_index][0],errors="coerce") 
-                 print(f"저장 형식 : {FORMATS_BY_LEN[date_len][date_index][1]}")
+                d = pd.to_datetime(df[date_cadidate],format = FORMATS_BY_LEN[date_len][date_index][0],errors="coerce") 
+                d = d.where(d.dt.year.between(1900, 2100))
+                df["year"] = d.dt.year.astype("Int64")
+                df["month"] = d.dt.month.astype("Int64")
+                print(f"저장 형식 : {FORMATS_BY_LEN[date_len][date_index][1]}")
 
             
 
