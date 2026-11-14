@@ -11,14 +11,22 @@ tools.py는 에이전트가 사용하는 도구들의 모음입니다
 3원본 데이터가 아니라 scripts/prepare_data.py로 미리 정의해준 data/csv만 읽도록 설계합시다 
 
 전체적인 흐름 
-1.CSV -> 
+1.CSV -> preprocessing.read_any_csv -> clean_table -> register_table(메모리에 저장)
+  질문 -> describe_data -> filter-and_aggregate(결과는 RESULTS에 보관 ,llm에는 일부만 )-> make_chart
+
 """
+
+import difflib
+import json
+from collections import OrderedDict
 from functools import lru_cache
 
 from pathlib import Path
 
 import pandas as pd
 from google.genai import types
+
+from preprocessing import clean_table,read_any_csv
 
 DATA_DIR = Path(__file__).parent / "data" #데이터 경로 저장
 MAX_ROWS = 20
