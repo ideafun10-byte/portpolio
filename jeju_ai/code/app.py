@@ -3,11 +3,20 @@
  
 Streamlit에서 꼭 알아야 할 한 가지:
 사용자가 뭔가 입력할 때마다 이 파일 전체가 '위에서 아래로 다시' 실행됩니다.
-그래서 지난 대화를 기억하려면 st.session_state(새로고침 전까지 유지되는 저장소)에 넣어 둬야 합니다."""
+그래서 지난 대화를 기억하려면 st.session_state(새로고침 전까지 유지되는 저장소)에 넣어 둬야 합니다.
 
+
+csv를 읽는 등 한번만 수행해야 하는 과정은 @st.cache_resource로 감싸 처음 한번만 실행한다 
+"""
+import re 
+from pathlib import Path
+
+import pandas as pd
+import altair as alt
 import streamlit as st
 
-from agent import run_agent
+from agent import run_agent,DEFAULT_MODEL
+from tools import TABELS,describe_data,get_result,label,load_builtin_tables,register_table
 
 st.set_page_config(page_title ="제주 데이터 분석 도우미 에이전트")
 st.title("제주 데이터 분석 도우미 에이전트")

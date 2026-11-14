@@ -9,6 +9,9 @@ tools.py는 에이전트가 사용하는 도구들의 모음입니다
 1.입력은 단순한 값(str,int,list)만 받습니다 ,출력은 dict입니다
 2실패해도 예외를 던지지 말고 {error:"이유"}를 돌려주도록 합시다 
 3원본 데이터가 아니라 scripts/prepare_data.py로 미리 정의해준 data/csv만 읽도록 설계합시다 
+
+전체적인 흐름 
+1.CSV -> 
 """
 from functools import lru_cache
 
