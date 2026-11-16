@@ -18,7 +18,7 @@ MAX_STEPS = 6 #사용횟수 제한
 
 
 
-SYSTEM_PROMPT =  """\
+SYSTEM_PROMPT_TEMPLATE =  """\
 너는 제주빅데이터센터 이용자(기관·기업 실무자, 연구자)를 돕는 데이터 분석 도우미다.
 이용자는 코딩을 모른다. 일상어 질문을 알아듣고, 보고서에 바로 옮길 수 있게 답한다.
  
@@ -55,13 +55,13 @@ def build_system_prompt() -> str:
     
     """
     lines = []
-    for name,t in TABLES.item():
-            df, date = t["df"],t["report"].get("date")
+    for name,t in TABLES.items():
+        df, date = t["df"],t["report"].get("date")
 
-            period = f", 기간 {df['period'].min()} ~ {df['period'].max()}" if date and "period" in df.columns else ""
-            cols = ", ".join(f"{c}({label(c)})" for c in df.columns)
-            lines.append(f"- {name}: {t['title']} / {len(df):,}행{period}\n  컬럼: {cols}")
-            return SYSTEM_PROMPT_TEMPLATE.format(tables="\n".join(lines) or "(없음)")
+        period = f", 기간 {df['period'].min()} ~ {df['period'].max()}" if date and "period" in df.columns else ""
+        cols = ", ".join(f"{c}({label(c)})" for c in df.columns)
+        lines.append(f"- {name}: {t['title']} / {len(df):,}행{period}\n  컬럼: {cols}")
+    return SYSTEM_PROMPT_TEMPLATE.format(tables="\n".join(lines) or "(없음)")
 
 #llm모델은 이 함수 한곳에서만 수행하니 나중에 ai를 바꿀시 여기만 교체하면 된다 
 def call_llm(client,model : str,contents: list,config) :
@@ -176,7 +176,7 @@ def run_agent(question : str, api_key : str | None = None,model : str |None = No
                    error="no_data")
         return out
 
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key="GEMINI_KEY")
     config = types.GenerateContentConfig(
         system_instruction=build_system_prompt(),
         tools = [types.Tool(function_declarations= get_tool_declarations())],
@@ -212,8 +212,7 @@ def run_agent(question : str, api_key : str | None = None,model : str |None = No
             #model = "None"으로 설정하고 도구 요청을 금지 ,반드시 글로만 답해야 한다 
 
         final_config = config.model_copy(update = {"tool_config" : types.ToolConfig(
-            function_calling_config= types.FunctionCallingConfig(mode = "NONE")
-        )})
+            function_calling_config= types.FunctionCallingConfig(mode = "NONE"))})
 
         response = call_llm(client,model,contents,final_config)
         _add_usage(out, response)

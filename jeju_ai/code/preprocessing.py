@@ -66,7 +66,7 @@ def read_any_csv(source) -> tuple[pd.DataFrame, str]:
     """파일이 저정된 경로를 받거나 또는 업로드된 파일 객체를 받아 '전부 글자 (str)'로 읽는다"""
 
     if isinstance(source,(str, Path)):
-        raw = Path(source).read_bytes
+        raw = Path(source).read_bytes()
 
     elif isinstance(source, bytes):
         raw = source
@@ -266,4 +266,4 @@ def clean_table(df : pd. DataFrame) -> tuple[pd.DataFrame,dict]:
                 report["numeric_columns"].append(col)
 
 
-        return df,report
+    return df,report
