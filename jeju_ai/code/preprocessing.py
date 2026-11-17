@@ -250,7 +250,7 @@ def clean_table(df : pd. DataFrame) -> tuple[pd.DataFrame,dict]:
             df = _add_date_columns(df, cand, fmt, unit, report)
             break
         report["date_candidates"].append({"column": cand, "result": "탈락 (형식이 맞는 값이 95% 미만)"})
-    if report["data"] is None:
+    if report["date"] is None:
         report["warnings"].append("날짜 컬럼을 찾지 못했습니다")
 
 

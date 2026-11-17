@@ -1,41 +1,49 @@
 """
-tools.py는 에이전트가 사용하는 도구들의 모음입니다
-여기서 명시하는 도구란 평범란 파이썬 함수이며 LLM은 이 함수를 직접 실행하지 못하고 "이 함수를 이 값으로 불러줘"라는 요청만 합니다
-실질적인 실행은 agent.py가 맡습니다
+tools.py — 표 등록 + 에이전트가 쓰는 '도구' 3개 + LLM에게 보여 줄 도구 설명서
 
+도구 = 평범한 파이썬 함수입니다.
+LLM은 이 함수를 직접 실행하지 못하고, "이 함수를 이 값으로 불러 줘"라고 '요청'만 합니다.
+실제 실행은 agent.py가 맡습니다.
 
+도구 규칙
+- 입력은 단순한 값(str, int, bool, list)만. LLM이 JSON으로 값을 넘겨주기 때문.
+- 출력은 dict. 이 dict가 그대로 LLM에게 돌아가므로 '작게' 만든다(행 수 제한 → 토큰 절약).
+- 실패해도 예외를 던지지 않고 {"error": "이유"}를 돌려준다 → LLM이 읽고 고쳐서 다시 부를 수 있음.
+- 툴 코드에 특정 데이터의 컬럼 이름을 쓰지 않는다 (어떤 CSV든 같은 툴로).
+  컬럼의 '한글 뜻'은 COLUMN_LABELS(데이터 사전)에만 적는다.
 
-도구 생성의 규칙
-1.입력은 단순한 값(str,int,list)만 받습니다 ,출력은 dict입니다
-2실패해도 예외를 던지지 말고 {error:"이유"}를 돌려주도록 합시다 
-3원본 데이터가 아니라 scripts/prepare_data.py로 미리 정의해준 data/csv만 읽도록 설계합시다 
-
-전체적인 흐름 
-1.CSV -> preprocessing.read_any_csv -> clean_table -> register_table(메모리에 저장)
-  질문 -> describe_data -> filter-and_aggregate(결과는 RESULTS에 보관 ,llm에는 일부만 )-> make_chart
-
+전체 흐름
+  CSV → preprocessing.read_any_csv → clean_table → register_table (메모리에 보관)
+  질문 → describe_data → filter_and_aggregate (결과는 RESULTS에 보관, LLM에겐 일부만) → make_chart
 """
-
 import difflib
 import json
+import re
+import unicodedata
 from collections import OrderedDict
-from functools import lru_cache
-
 from pathlib import Path
 
 import pandas as pd
 from google.genai import types
 
-from preprocessing import clean_table,read_any_csv
+from preprocessing import clean_table, read_any_csv
 
-DATA_DIR = Path(__file__).parent / "data" #데이터 경로 저장
-MAX_ROWS = 30  #llm에 돌려줄 표의 최대 행수 (화면에는 전체를 보여준다 )
-MAX_CATEGORY_VALUES = 60 #describe_data에서 버여줄 최대 범주 컬럼의 값
-MAX_RESULTS = 50 #RESULTS에 보관할 집계 수
+DATA_DIR = Path(__file__).parent.parent / "data"
+# [수정 3-나] 내장 데이터를 찾는 곳: data/ 바로 아래 + scripts/convert_raw.py가 만든 data/<이름>_utf8/ 폴더
+#   원본 폴더(data/raw, data/hub 등)는 읽지 않는다 → 같은 데이터가 두 번 등록되는 것을 막음
+CONVERTED_SUFFIX = "_utf8"
+EXCLUDE_FILES = {"data_dictionary.csv"}  # 분석할 표가 아니라 '컬럼 사전' 파일이므로 표로 등록하지 않음
+MAX_ROWS = 30  # LLM에게 돌려줄 표의 최대 행 수 (화면에는 전체를 보여 줌)
+MAX_CATEGORY_VALUES = 60  # describe_data에서 범주 컬럼의 값 목록을 몇 개까지 보여 줄지
+MAX_RESULTS = 50  # RESULTS에 보관할 집계 결과 수 (오래된 것부터 지움 → 메모리 절약)
 ALLOWED_AGGS = {"sum": "합계", "mean": "평균", "count": "행 수", "max": "최댓값", "min": "최솟값"}
-UNKNOWN_LIKE = {"알수없음", "알 수 없음", "미상", "기타", "unknown"}  
+UNKNOWN_LIKE = {"알수없음", "알 수 없음", "미상", "기타", "unknown"}  # 결과에 있으면 한계 문구를 붙일 값
 
-# 앱에서 쓸 수 있는 표 이름 목록 (data/ 폴더의 파일 이름, 확장자 제외)
+# ---------------------------------------------------------------------------
+# 데이터 사전: 영문 컬럼 → (한글 뜻, 단위)
+# 내부 컬럼명은 영문 그대로 두고, 화면·답변에서만 한글을 쓴다.
+# TODO(개선): 명세서 기반 사전(build_dictionary.py)을 만들면 여기에 합치기
+# ---------------------------------------------------------------------------
 COLUMN_LABELS = {
     # 카드 이용 현황 (제주데이터허브)
     "base_year_month": ("기준 연월", ""),
@@ -52,141 +60,217 @@ COLUMN_LABELS = {
     "weekday": ("요일", ""),
 }
 
+# 내장 데이터의 화면용 이름과 출처. 키 = data 폴더의 파일 이름(확장자 제외)
+# TODO: 실제 파일 이름으로 바꾸기. 여기에 없는 파일도 등록은 되고, 제목·출처는 파일 이름으로 표시됨
 BUILTIN_INFO = {
-    #{" 짧은 제목(key)": {"title": "파일 제목", "source" : "제주데이터허브 「허브 페이지의 데이터셋 이름」 "}}
-    "사교육비_정보": {"title": "시도별학생1인당월평균사교육비정보", "source" : "제주데이터허브 「교육,행정」 "},
-
-"카드이용_정보": {"title": "업종별성별카드이용정보", "source" : "제주데이터허브 「소비,경제」 "},
-
-"버스_승차수": {"title": "일별시간대별버스승차인원수현황", "source" : "제주데이터허브 「교통,안전」 "},
-
-"제주관공서_현황": {"title": "제주관내관공서및주요기관현황", "source" : "제주데이터허브 「교육,행정」 "},
-
-"날씨_현황": {"title": "제주기상개황정보", "source" : "제주데이터허브 「환경,재난」 "},
-
-"내국인_유동인구_현황": {"title": "제주도방문내국인유동인구추이", "source" : "제주데이터허브 「인구,생활」 "},
-
-"미세먼지_현황": {"title": "제주월별미세먼지(PM10)대기오염도정보", "source" : "제주데이터허브 「환경,재난」 "},
-
-"응급실_현황": {"title": "제주응급실보유병원정보", "source" : "제주데이터허브 「보건,복지」 "},
-
-"고등학교_현황": {"title": "제주일반고등학교(국·공립)현황", "source" : "제주데이터허브 「교육,행정」 "},
-
-"클린하우스 현황": {"title": "제주특별자치도 서귀포시_클린하우스현황_20240823", "source" : "제주데이터허브 「환경,재난」 "},
-
-"관광지입장객_추이": {"title": "제주특별자치도_내국인관광지입장객수추이", "source" : "제주데이터허브 「관광,여행」 "},
-
-"음식점_목록": {"title": "제주특별자치도음식점목록(통합)", "source" : "제주데이터허브 「소비,경제」 "},
-
-"폐업_음식점수": {"title": "제주특별자치도음식점목록(통합)_인허가일에따른영업및폐업음식점수", "source" : "제주데이터허브 「소비,경제」 "},
-
-"해수욕장_현황": {"title": "제주특별자치도해수욕장정보", "source" : "제주데이터허브 「관광,여행」 "}
+    "card_usage": {
+        "title": "제주 업종별·이용자 유형별·성별 카드 이용 현황 (월간)",
+        "source": "제주데이터허브 공개 데이터",
+    },
 }
 
-TABLES : dict[str,dict] = {} # 표 이름
-RESULTS : "OrderedDict[str,pd.DataFrame]" = OrderedDict()
+# ---------------------------------------------------------------------------
+# 표 보관소
+# [학습 포인트] 모듈 수준 dict는 프로그램이 켜져 있는 동안 계속 유지된다.
+#   CSV를 질문마다 다시 읽지 않고 한 번 정리해서 메모리에 두는 이유: 디스크 읽기·전처리는 느리고,
+#   질문마다 반복하면 시간 낭비. (28,000행 정도는 메모리 몇 MB 수준이라 부담 없음)
+# ---------------------------------------------------------------------------
+TABLES: dict[str, dict] = {}  # 표 이름 → {"name", "df", "title", "source", "report", "describe"}
+RESULTS: "OrderedDict[str, pd.DataFrame]" = OrderedDict()  # 결과 id → 집계 결과 전체
 _result_counter = 0
+# [수정 3-가] '내장 데이터를 이미 읽었는가'를 TABLES와 같은 파일(모듈)에 둔다.
+#   None = 아직 한 번도 안 읽음.  dict = 읽은 결과 (파일 경로 → 등록 결과)
+_builtin_results: dict[str, dict] | None = None
 
-def label(col:str) -> str:
-    """컬럼 이름 -> 한글 뜻(단위), 사전에 없으면 영문 그대로 """
 
+def label(col: str) -> str:
+    """컬럼 이름 → '한글 뜻(단위)'. 사전에 없으면 영문 그대로."""
     if col not in COLUMN_LABELS:
         return col
-
     ko, unit = COLUMN_LABELS[col]
-    return f"{ko}({unit})" if unit else ko  #유닛이 없으면 ko를 반환
+    return f"{ko}({unit})" if unit else ko
 
 
-def register_table(name: str , source, title :str |None = None , source_label : str | None = None) -> dict:
-    """CSV를 또는 업로드 바이트를 읽고 공통 전처리를 거친다음에 TABLE에 등록한다 
-    
-    내장 데이터와 업로드 데이터가 모두 이 함수 하나를 거친다
-    output:{"name","report"} 또는 {"error"}
+# ---------------------------------------------------------------------------
+# [수정 3-다] 표 이름 만들기 / 찾기
+# ---------------------------------------------------------------------------
+def safe_table_name(text: str) -> str:
+    """파일 이름(확장자 제외) → 표 이름. 한글·영문·숫자·_ 만 남긴다.
+
+    [학습 포인트] LLM은 도구를 부를 때 표 이름을 '글자 그대로' 적어야 한다.
+      '제주시 유동인구(2024).v2' 처럼 공백·괄호·점이 섞인 이름은 LLM이 한 글자만 다르게 적어도 못 찾는다.
+      그래서 등록할 때 미리 단순한 이름으로 바꿔 둔다. (내장 파일과 업로드 파일이 같은 규칙을 씀)
     """
+    text = unicodedata.normalize("NFC", str(text))  # Mac에서 온 파일 이름의 풀어진 한글(NFD)을 합침
+    name = re.sub(r"[^0-9A-Za-z가-힣_]+", "_", text).strip("_")[:40]
+    return name or "table"
 
-    try: 
-        raw,encoding = read_any_csv(source)
+
+def _norm(text) -> str:
+    """이름 '비교'용: 끝의 .csv를 떼고, 공백·기호를 빼고, 소문자로 맞춘다."""
+    text = unicodedata.normalize("NFC", str(text)).lower().strip()
+    text = re.sub(r"\.csv$", "", text)
+    return re.sub(r"[^0-9a-z가-힣]", "", text)
+
+
+def resolve_table_name(name) -> str | None:
+    """LLM이 적어 보낸 이름으로 실제 표 이름을 찾는다. 못 찾으면 None.
+
+    찾는 순서: ① 글자 그대로 같은 이름 → ② 공백·기호·대소문자만 다른 이름 또는 '제목'
+    [학습 포인트] '비슷한 이름'으로 추측해서 고르지는 않는다. 엉뚱한 표로 계산하면
+      오류보다 더 나쁜 '틀린 숫자'가 나오기 때문. 애매하면 None → 도구가 error로 표 목록을 알려 준다.
+    """
+    if isinstance(name, str) and name in TABLES:
+        return name
+    key = _norm(name)
+    if not key:
+        return None
+    matches = [n for n, t in TABLES.items() if key in (_norm(n), _norm(t["title"]))]
+    return matches[0] if len(matches) == 1 else None
+
+
+def register_table(name: str, source, title: str | None = None, source_label: str | None = None) -> dict:
+    """CSV(경로 또는 업로드 bytes)를 읽고 공통 전처리를 거쳐 TABLES에 등록한다.
+
+    내장 데이터와 업로드 데이터가 모두 이 함수 하나를 지나간다 → '똑같이 처리'가 보장됨.
+    돌려주는 값: {"name", "report"} 또는 {"error"}
+    """
+    try:
+        raw, encoding = read_any_csv(source)
         df, report = clean_table(raw)
-
-    except Exception as e : #어떤 csv가 와도 앱이 멈추지 않게 
-        return  {"error" : f"CSV를 읽지 못했습니다 : {e}"}
+    except Exception as e:  # 어떤 CSV가 와도 앱이 멈추지 않게
+        return {"error": f"CSV를 읽지 못했습니다: {e}"}
     if df.empty:
-        return {"error" : "CSV에는 데이터 행이 없습니다 "}
+        return {"error": "CSV에 데이터 행이 없습니다"}
 
     report["encoding"] = encoding
     TABLES[name] = {
+        "name": name,
         "df": df,
         "title": title or name,
         "source": source_label or f"이용자 제공 파일 ({name})",
         "report": report,
         "describe": None,  # describe_data 결과를 처음 한 번만 계산해 저장 (캐시)
     }
-    return {"name": name, "report": report}   
+    return {"name": name, "report": report}
+
+
+def _builtin_files() -> list[Path]:
+    """내장 데이터 후보 파일 목록. data/*.csv 먼저, 그다음 data/*_utf8/*.csv (폴더·파일 이름 순)."""
+    if not DATA_DIR.exists():
+        return []
+    folders = [DATA_DIR] + sorted(p for p in DATA_DIR.iterdir()
+                                  if p.is_dir() and p.name.endswith(CONVERTED_SUFFIX))
+    files = []
+    for folder in folders:
+        files += sorted(
+            p for p in folder.iterdir()
+            # suffix.lower(): 'DATA.CSV' 처럼 확장자가 대문자인 파일도 읽음
+            # '.'·'~$'로 시작하는 파일: 숨김 파일, 엑셀이 열려 있을 때 생기는 임시 파일 → 건너뜀
+            if p.is_file() and p.suffix.lower() == ".csv"
+            and p.name not in EXCLUDE_FILES and not p.name.startswith((".", "~$"))
+        )
+    return files
 
 
 def load_builtin_tables() -> list[dict]:
-    """data 폴더의 존재하는 CSV를 전부 등록한다 , 앱 시작할때 한 번 부른다"""
-    results = []
-    for path in sorted(DATA_DIR.glob("*.csv")):  # 데이터 폴더 하위에 존재하는 csv를 한번씩 부른다
-        info = BUILTIN_INFO.get(path.stem,{})
-        results.append(register_table(
-            name = path.stem,
-            source=path,
-            title=info.get("title"),
-            source_label=f"{info.get('source', '제주데이터허브 공개 데이터')}, 파일 {path.name}",
-        ))
+    """내장 CSV를 전부 등록한다. 이미 같은 이름으로 등록된 표는 건너뛴다 → 여러 번 불러도 안전.
 
+    돌려주는 값: 이번에 '새로' 시도한 파일마다 {"file", "name", "report"} 또는 {"file", "error"}
+    """
+    results = []
+    for path in _builtin_files():
+        name = safe_table_name(path.stem)
+        if name in TABLES:  # 이미 등록됨 (다시 부른 경우, 또는 두 폴더에 같은 이름의 파일이 있는 경우)
+            continue
+        info = BUILTIN_INFO.get(path.stem, {})
+        res = register_table(
+            name=name,
+            source=path,
+            title=info.get("title") or path.stem,  # 사전에 없으면 파일 이름을 제목으로
+            source_label=f"{info.get('source', '제주데이터허브 공개 데이터')}, 파일 {path.name}",
+        )
+        res["file"] = str(path.relative_to(DATA_DIR))
+        if "error" in res:  # 어느 파일에서 난 오류인지 알 수 있게 파일 이름을 앞에 붙임
+            res["error"] = f"{res['file']}: {res['error']}"
+        results.append(res)
     return results
 
 
-def get_result(result_id : str) -> pd.DataFrame | None :
-    """app.py가 접근하며 를 집계 결과 전체를꺼낼 때 사용한다 """
+def ensure_builtin_tables(rescan: bool = False) -> list[dict]:
+    """내장 데이터가 아직 안 올라와 있으면 읽고, 이미 읽었으면 아무 일도 하지 않는다.
+
+    화면(app.py)이 다시 실행될 때마다 불러도 된다. rescan=True면 data 폴더를 다시 훑어 새 파일만 추가한다.
+
+    [학습 포인트] 예전에는 app.py에서 @st.cache_resource로 '앱이 켜져 있는 동안 딱 한 번'만 읽었다.
+      그런데 Streamlit은 .py 파일이 저장되면 우리 모듈(tools, agent 등)을 메모리에서 지우고 다시 import한다.
+      → TABLES는 빈 dict로 새로 만들어지는데, 캐시는 '이미 실행했음'이라고 기억해서 다시 읽지 않는다.
+      → 화면에는 데이터가 없다고 나온다.
+      '읽었는지 표시(_builtin_results)'를 TABLES와 같은 모듈에 두면, 모듈이 새로 만들어질 때
+      표시도 함께 None으로 돌아가므로 자동으로 다시 읽는다. (둘의 수명이 같아짐)
+    """
+    global _builtin_results
+    if _builtin_results is None or rescan:
+        found = dict(_builtin_results or {})
+        for res in load_builtin_tables():
+            found[res["file"]] = res  # 같은 파일을 다시 시도했으면 새 결과로 바꿈
+        _builtin_results = found
+    return list(_builtin_results.values())
+
+
+def get_result(result_id: str) -> pd.DataFrame | None:
+    """화면(app.py)이 집계 결과 '전체'를 꺼낼 때 쓴다."""
     return RESULTS.get(result_id)
 
 
-
 def _to_records(df: pd.DataFrame) -> list[dict]:
-    """DataFrame -> JSON으로 보낼 수 있는 dict 목록을 반환
-    데이터 프레임 -> JSON -> 순수 파이썬 타입"""
+    """DataFrame → JSON으로 보낼 수 있는 dict 목록.
 
-    return json.loads(df.to_json(orient = "records", force_ascii= False))
-
-def _get_table(name :str): 
-    """이름으로 표를 찾는다 ,없으면 (None, error dict)"""
-    if name not in TABLES:
-        return None,{"error": f"'{name}' 표가 없습니다. 사용할 수 있는 표: {list(TABLES)}"}
-    return TABLES[name], None
+    [학습 포인트] numpy 정수, pandas의 <NA> 같은 값은 그대로 LLM API에 보내면 직렬화 오류가 난다.
+      to_json → json.loads 를 한 번 거치면 전부 파이썬 기본 타입(int, float, str, None)이 된다.
+    """
+    return json.loads(df.to_json(orient="records", force_ascii=False))
 
 
-#도구 1 데이터 설명
+def _get_table(name: str):
+    """이름으로 표를 찾는다. 없으면 (None, error dict)."""
+    real = resolve_table_name(name)
+    if real is None:
+        # 이름과 제목을 함께 알려 줘야 LLM이 '제목'이 아니라 '이름'을 골라 다시 부를 수 있다
+        listing = [f"{n} ({t['title']})" for n, t in TABLES.items()]
+        return None, {"error": f"'{name}' 표가 없습니다. 표 이름은 다음 중 하나를 글자 그대로 쓰세요 "
+                               f"(괄호 안은 제목): {listing}"}
+    return TABLES[real], None
+
+
+# ---------------------------------------------------------------------------
+# 도구 1. 데이터 설명
+# ---------------------------------------------------------------------------
 def describe_data(name: str) -> dict:
-    """표의 컬럼(한글 뜻,종류,값 목록),행 수,기간을 알려준다 
-    LLM은 처음엔 컬럼 이름도 정확한 값 이름도 모른다 
-    그래서 LLM이 이 도구를 먼저 호출해서 어떤 컬럼으로 거르고 묶을 수 있는지 값은 뭐라고 적혀 있는지를 파악한다 """
+    """표의 컬럼(한글 뜻·종류·값 목록), 행 수, 기간을 알려 준다.
 
+    LLM은 처음엔 컬럼 이름도, '한식 음식점업' 같은 정확한 값 이름도 모른다.
+    그래서 이 도구를 먼저 불러 '어떤 컬럼으로 거르고 묶을 수 있는지, 값은 정확히 뭐라고 적혀 있는지'를 본다.
+    """
     table, err = _get_table(name)
     if err:
         return err
-    assert table is not None #나의 보증
-    if table["describe"] is not None:
+    assert table is not None
+    if table["describe"] is not None:  # 이미 계산했으면 재사용
         return table["describe"]
 
     df = table["df"]
     date_info = table["report"]["date"]
     columns = []
-
     for col in df.columns:
-        s = df[col] 
-        item = {"column": col , "meaning": label(col)} #의미를 적어나 llm도 이해할 수 있게
-        
-        if date_info and col == date_info["column"]:  #들어온 숫자가 날짜면..
+        s = df[col]
+        item = {"column": col, "meaning": label(col)}
+        if date_info and col == date_info["column"]:
             item["kind"] = f"날짜 원본 ({date_info['unit']} 단위). 거르기·묶기는 year, month, period를 쓸 것"
-
-        elif pd.api.types.is_numeric_dtype(s):  #들어온 컬럼이 숫자면 하는 처리
+        elif pd.api.types.is_numeric_dtype(s):
             item["kind"] = "숫자"
-            item["min"] , item["max"] = s.min(),s.max()
-
-            #년도,월처럼 범위가 적은 숫자,컬럼은 목록 보여주기
+            item["min"], item["max"] = s.min(), s.max()
+            # 연도·월처럼 값 종류가 적은 숫자 컬럼은 값 목록도 보여 줌 (거르기에 쓰이므로)
             if s.nunique() <= 31:
                 item["values"] = sorted(s.dropna().unique().tolist())
         else:
@@ -199,7 +283,7 @@ def describe_data(name: str) -> dict:
         columns.append(item)
 
     result = {
-        "name": name,
+        "name": table["name"],  # LLM이 살짝 다르게 적어 보냈어도 '진짜 이름'을 돌려줌
         "title": table["title"],
         "rows": len(df),
         "columns": columns,
@@ -217,9 +301,7 @@ def describe_data(name: str) -> dict:
 # 도구 2. 거르기 + 묶기 + 집계
 # ---------------------------------------------------------------------------
 def _build_mask(df: pd.DataFrame, filters: list[dict]):
-    """filters = [{"column": "year", "values": ["2024"]}, ...] → 행 선택 마스크. 실패하면 (None, error).
-    
-    build_mask가 각 행이 조건에 맞는지 True/False로 표시한 목록(마스크)을 만들어 넘깁니다"""
+    """filters = [{"column": "year", "values": ["2024"]}, ...] → 행 선택 마스크. 실패하면 (None, error)."""
     mask = pd.Series(True, index=df.index)
     for f in filters:
         col, values = f.get("column"), f.get("values")
@@ -263,9 +345,7 @@ def filter_and_aggregate(
         filters=[{"column": "year", "values": ["2024"]}], group_by=["biz_nm"],
         metric="use_amount", agg="sum", sort="desc", top_n=5
     """
-
     global _result_counter
-
     table, err = _get_table(name)
     if err:
         return err
@@ -378,7 +458,8 @@ def make_chart(result_id: str, kind: str, x: str, y: str, title: str) -> dict:
 # ---------------------------------------------------------------------------
 def get_tool_declarations() -> list[types.FunctionDeclaration]:
     table_names = list(TABLES) or ["(등록된 표 없음)"]
-    name_param = {"type": "string", "enum": table_names, "description": "표 이름"}
+    name_param = {"type": "string", "enum": table_names,
+                  "description": "표 이름. 표 목록에 적힌 이름을 글자 그대로 (제목이 아님)"}
 
     return [
         types.FunctionDeclaration(
@@ -449,6 +530,3 @@ TOOL_FUNCTIONS = {
     "filter_and_aggregate": filter_and_aggregate,
     "make_chart": make_chart,
 }
-
-
-    

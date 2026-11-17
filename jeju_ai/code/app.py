@@ -1,46 +1,44 @@
 """
 app.py — 화면 담당 (계산은 tools.py, 판단은 agent.py에 맡김)
 
-실행:  
-streamlit run code/app.py
+실행:  streamlit run code/app.py
+
 화면 구성
   왼쪽(사이드바): ① API 키·모델 이름  ② 데이터 목록 + CSV 올리기
   가운데: 데이터 소개(LLM 안 씀) → 예시 질문 버튼 → 대화(답·그래프·표·계산 과정)
 
 [학습 포인트] Streamlit은 사용자가 무언가 누르거나 입력할 때마다 이 파일 전체를 '위에서 아래로 다시' 실행한다.
-  그래서
   - 지난 대화는 st.session_state(브라우저 탭을 닫기 전까지 유지되는 저장소)에 넣어 두고 매번 다시 그린다.
-  - 한 번만 해야 하는 일(내장 CSV 읽기)은 @st.cache_resource로 감싸 처음 한 번만 실행한다.
+  - 한 번만 해야 하는 일(내장 CSV 읽기)은 tools.ensure_builtin_tables()가 '이미 읽었으면 건너뛰기'로 처리한다.
 """
 import re
 from pathlib import Path
-import pandas as pd
+
 import altair as alt
+import pandas as pd
 import streamlit as st
 
-from agent import DEFAULT_MODEL, run_agent
-from tools import TABLES, describe_data, get_result, label, load_builtin_tables, register_table
+from agent import run_agent, settings_status
+from tools import (DATA_DIR, TABLES, describe_data, ensure_builtin_tables, get_result, label,
+                   register_table, safe_table_name)
 
 st.set_page_config(page_title="제주 데이터 분석 도우미", layout="wide")
 
 
 # ---------------------------------------------------------------------------
-# 시작할 때 한 번: 내장 데이터(data/*.csv) 등록
+# 시작할 때: 내장 데이터 등록
+# [수정 3-가] @st.cache_resource를 쓰지 않는다.
+#   캐시는 '이미 실행했음'만 기억하고, 표 보관소(TABLES)가 비워졌는지는 모른다.
+#   ensure_builtin_tables()는 표 보관소와 같은 모듈에서 '읽었는지'를 직접 확인하므로
+#   화면이 다시 실행될 때마다 불러도 되고(이미 읽었으면 즉시 끝남), 보관소가 비면 알아서 다시 읽는다.
 # ---------------------------------------------------------------------------
-@st.cache_resource  # 프로그램이 켜져 있는 동안 한 번만 실행 (CSV 읽기·전처리는 느리니까)
-def init_builtin_tables() -> list[dict]:
-    return load_builtin_tables()
+builtin_results = ensure_builtin_tables()
 
-
-builtin_results = init_builtin_tables()
-
-if "messages" not in st.session_state:  #지금까지의 질문과 답 목록
+if "messages" not in st.session_state:
     st.session_state.messages = []  # [{"role": "user", "content"} 또는 {"role": "assistant", **run_agent 결과}]
-
-if "uploaded" not in st.session_state:  #이미 등록한 업로드 파일 기록
+if "uploaded" not in st.session_state:
     st.session_state.uploaded = {}  # (파일 이름, 크기) → 등록한 표 이름. 같은 파일을 매번 다시 등록하지 않으려고
-
-if "focus_table" not in st.session_state: #"데이터 소개"에 보여 줄 표 이름
+if "focus_table" not in st.session_state:
     st.session_state.focus_table = next(iter(TABLES), None)  # '데이터 소개'에 보여 줄 표
 
 
@@ -53,8 +51,8 @@ def plain(meaning: str) -> str:
 
 
 def table_name_from_file(file_name: str) -> str:
-    """업로드 파일 이름 → 표 이름. LLM이 이름을 그대로 적어야 하므로 글자·숫자·_만 남긴다."""
-    name = re.sub(r"[^0-9A-Za-z가-힣_]", "_", Path(file_name).stem)[:40] or "uploaded"
+    """업로드 파일 이름 → 표 이름. 내장 파일과 같은 규칙(tools.safe_table_name)을 쓴다."""
+    name = safe_table_name(Path(file_name).stem)
     return f"{name}_upload" if name in TABLES and name not in st.session_state.uploaded.values() else name
 
 
@@ -139,6 +137,12 @@ def render_assistant(msg: dict, idx: int) -> None:
                     file_name=f"분석결과_{d['result_id']}.csv", mime="text/csv", key=f"dl-{idx}-{d['result_id']}",
                 )
 
+    u = msg["usage"]
+    usage_line = f"LLM 호출 {u['calls']}회 · 토큰 {u['total_tokens']:,}개 (입력 {u['prompt_tokens']:,} / 출력 {u['output_tokens']:,})"
+    # [수정 2] 도구를 하나도 안 쓴 답(인사·안내·거절)에는 '계산 과정' 상자를 그리지 않는다 (보여 줄 과정이 없으므로)
+    if not msg["steps"]:
+        st.caption(usage_line if u["calls"] else "미리 준비된 안내입니다 (LLM 호출 0회)")
+        return
     with st.expander("계산 과정 보기"):
         for i, s in enumerate(msg["steps"], 1):
             mark = "성공" if s["ok"] else "실패 → 고쳐서 다시 시도"
@@ -146,8 +150,7 @@ def render_assistant(msg: dict, idx: int) -> None:
             st.code(", ".join(f"{k}={v}" for k, v in s["args"].items()) or "(입력 없음)", language=None)
             if s["detail"]:
                 st.caption(s["detail"])
-        u = msg["usage"]
-        st.caption(f"LLM 호출 {u['calls']}회 · 토큰 {u['total_tokens']:,}개 (입력 {u['prompt_tokens']:,} / 출력 {u['output_tokens']:,})")
+        st.caption(usage_line)
 
 
 def render_intro(name: str) -> None:
@@ -183,24 +186,43 @@ def render_intro(name: str) -> None:
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("1. 설정")
-    # [학습 포인트] type="password" → 화면에 ●●●로 보임. 입력한 키는 이 탭의 메모리에만 있고 파일로 저장하지 않는다.
-    key_input = st.text_input("API 키 (Gemini)", type="password",
-                              help="비워 두면 .env 파일의 GEMINI_API_KEY를 씁니다")
-    model_input = st.text_input("모델 이름", value=DEFAULT_MODEL, help=".env의 GEMINI_MODEL이 기본값")
+    # [수정 1] 두 칸 모두 '비워 두면 .env 값을 쓴다'로 통일하고, 실제로 어떤 값이 쓰이는지 바로 아래에 보여 준다.
+    # [학습 포인트] value=는 칸에 '실제로 들어 있는 글자', placeholder=는 칸이 비었을 때 흐리게 보이는 '안내 글자'.
+    #   기본 모델을 value로 넣으면 그 글자가 '화면 입력'으로 취급돼 .env를 고쳐도 옛 값이 계속 쓰인다.
+    #   그래서 placeholder로만 보여 주고, 칸이 비어 있으면 agent가 .env → 기본값 순서로 찾게 한다.
+    # type="password" → 화면에 ●●●로 보임. 입력한 키는 이 탭의 메모리에만 있고 파일로 저장하지 않는다.
+    key_input = st.text_input("API 키 (원하는 모델)", type="password", placeholder="비워 두면 GEMIMI_KEY 사용합니다",
+                              help="여기에 입력하면 연결된 모델보다 우선해서 사용됩니다 ")
+    model_input = st.text_input("모델 이름", placeholder=f"비워 두면 {settings_status()['model']}",
+                                help="비워 두면 .env의 GEMINI_MODEL, 그것도 없으면 기본 모델을 씁니다.")
+    status = settings_status(key_input, model_input)  # 화면 입력까지 반영한 '실제로 쓰일 설정'
+    if status["has_key"]:
+        st.caption(f"API 키: {status['key_source']}의 키 사용 중  \n모델: {status['model']} ({status['model_source']})")
+    else:
+        st.warning("API 키가 없습니다. 위 칸에 API 키를 입력해주세요.")
+    if status["key_problem"]:
+        st.caption(f"알림: {status['key_problem']}")
 
     st.header("2. 데이터")
+    # [수정 3-나] 앱을 켠 뒤에 data 폴더에 파일을 넣은 경우를 위해 '다시 읽기' 버튼을 둔다 (새 파일만 추가로 읽음)
+    if st.button("data 폴더 다시 읽기", help="앱을 켠 뒤에 data 폴더에 CSV를 넣었다면 눌러 주세요"):
+        builtin_results = ensure_builtin_tables(rescan=True)
     for r in builtin_results:
         if "error" in r:
-            st.error(r["error"])
+            st.error(r["error"])  # 어느 파일에서 실패했는지 파일 이름이 함께 나옴
     if not TABLES:
-        st.info("등록된 데이터가 없습니다. data 폴더에 CSV를 넣거나 아래에서 올려 주세요.")
+        st.info("등록된 데이터가 없습니다. 아래 폴더(또는 그 안의 '…_utf8' 폴더)에 CSV를 넣거나, 아래에서 올려 주세요.  \n"
+                f"찾아본 폴더: {DATA_DIR}")
 
     uploaded = st.file_uploader("CSV 올리기", type=["csv"],
                                 help="센터에서 내려받은 CSV(UTF-8) 또는 직접 가진 CSV")
     if uploaded is not None:
         file_key = (uploaded.name, uploaded.size)
-        if file_key not in st.session_state.uploaded:  # 처음 올린 파일만 등록 (화면이 다시 실행돼도 한 번만)
-            name = table_name_from_file(uploaded.name)
+        registered = st.session_state.uploaded.get(file_key)
+        # [수정 3-가] '등록했다는 기록'만 믿지 않고, 표 보관소에 실제로 있는지도 확인한다.
+        #   (코드를 저장해 표 보관소가 비워졌는데 기록만 남아 있으면, 올린 파일이 사라진 채로 남는다)
+        if registered is None or registered not in TABLES:
+            name = registered or table_name_from_file(uploaded.name)
             res = register_table(name, uploaded.getvalue(), title=uploaded.name,
                                  source_label=f"이용자 제공 파일 ({uploaded.name})")
             if "error" in res:
@@ -253,7 +275,9 @@ if question:
         st.write(question)
     with st.chat_message("assistant"):
         with st.spinner("분석 중입니다..."):
-            result = run_agent(question, api_key=key_input or None, model=model_input or None)
+            # focus_table: '이 데이터'가 어느 표인지 LLM이 알 수 있게, 지금 화면에서 보고 있는 표를 함께 넘김
+            result = run_agent(question, api_key=key_input or None, model=model_input or None,
+                               focus_table=st.session_state.focus_table)
         msg = {"role": "assistant", **result}
         render_assistant(msg, len(st.session_state.messages))
     st.session_state.messages.append(msg)
