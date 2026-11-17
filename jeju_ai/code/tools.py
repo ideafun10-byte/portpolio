@@ -36,6 +36,7 @@ EXCLUDE_FILES = {"data_dictionary.csv"}  # 분석할 표가 아니라 '컬럼 �
 MAX_ROWS = 30  # LLM에게 돌려줄 표의 최대 행 수 (화면에는 전체를 보여 줌)
 MAX_CATEGORY_VALUES = 60  # describe_data에서 범주 컬럼의 값 목록을 몇 개까지 보여 줄지
 MAX_RESULTS = 50  # RESULTS에 보관할 집계 결과 수 (오래된 것부터 지움 → 메모리 절약)
+MAX_NAME_LEN = 60
 ALLOWED_AGGS = {"sum": "합계", "mean": "평균", "count": "행 수", "max": "최댓값", "min": "최솟값"}
 UNKNOWN_LIKE = {"알수없음", "알 수 없음", "미상", "기타", "unknown"}  # 결과에 있으면 한계 문구를 붙일 값
 
@@ -102,7 +103,7 @@ def safe_table_name(text: str) -> str:
       그래서 등록할 때 미리 단순한 이름으로 바꿔 둔다. (내장 파일과 업로드 파일이 같은 규칙을 씀)
     """
     text = unicodedata.normalize("NFC", str(text))  # Mac에서 온 파일 이름의 풀어진 한글(NFD)을 합침
-    name = re.sub(r"[^0-9A-Za-z가-힣_]+", "_", text).strip("_")[:40]
+    name = re.sub(r"[^0-9A-Za-z가-힣_]+", "_", text).strip("_")[:MAX_NAME_LEN]
     return name or "table"
 
 
@@ -172,17 +173,37 @@ def _builtin_files() -> list[Path]:
         )
     return files
 
+def _unique_name(base: str) -> str:
+    """base가 이미 쓰이고 있으면 뒤에 _2, _3 … 을 붙여 겹치지 않는 표 이름을 만든다."""
+    if base not in TABLES:  # 겹치지 않으면 그대로 사용
+        return base
+    i = 2
+    # MAX_NAME_LEN - 3 = 글자 수 제한 안에 '_2' ~ '_99' 꼬리가 들어갈 자리를 남긴 길이
+    while f"{base[:MAX_NAME_LEN - 3]}_{i}" in TABLES:  # _2도 쓰이고 있으면 _3, _4 … 로
+        i += 1
+    return f"{base[:MAX_NAME_LEN - 3]}_{i}"
 
 def load_builtin_tables() -> list[dict]:
-    """내장 CSV를 전부 등록한다. 이미 같은 이름으로 등록된 표는 건너뛴다 → 여러 번 불러도 안전.
+    """내장 CSV를 전부 등록한다. 이미 읽은 파일은 건너뛴다 → 여러 번 불러도 안전.
 
-    돌려주는 값: 이번에 '새로' 시도한 파일마다 {"file", "name", "report"} 또는 {"file", "error"}
+    돌려주는 값: 이번에 '새로' 시도한 파일마다
+      {"file", "name", "report"} 성공 / {"file", "error"} 실패 / {"file", "skipped"} 일부러 건너뜀
+
+    [수정 11/16-2] 서로 다른 파일이 같은 표 이름으로 바뀌는 경우
+      ① 파일 이름이 다르면 _2를 붙여 둘 다 등록
+      ② 파일 이름까지 같으면(다른 폴더의 같은 파일) 건너뛰되 그 사실을 결과에 남긴다
     """
     results = []
+    loaded_files = {t.get("file") for t in TABLES.values()}  # 이미 읽은 파일 경로
+    stems = {t["stem"]: t["file"] for t in TABLES.values() if t.get("stem")}  # 파일 이름(확장자 제외) → 경로
     for path in _builtin_files():
-        name = safe_table_name(path.stem)
-        if name in TABLES:  # 이미 등록됨 (다시 부른 경우, 또는 두 폴더에 같은 이름의 파일이 있는 경우)
+        rel = str(path.relative_to(DATA_DIR))  # data 폴더 기준 경로 (예: hub_utf8\card_usage.csv)
+        if rel in loaded_files:  # 같은 파일을 다시 읽으려는 경우 (rescan=True) → 조용히 넘어감
             continue
+        if path.stem in stems:  # 다른 폴더에 이름이 똑같은 파일 → 한 번만 등록하고 기록을 남김
+            results.append({"file": rel, "skipped": f"이름이 같은 파일이 이미 등록되어 건너뜀 ({stems[path.stem]})"})
+            continue
+        name = _unique_name(safe_table_name(path.stem))  # 표 이름이 겹치면 _2, _3을 붙임
         info = BUILTIN_INFO.get(path.stem, {})
         res = register_table(
             name=name,
@@ -190,9 +211,13 @@ def load_builtin_tables() -> list[dict]:
             title=info.get("title") or path.stem,  # 사전에 없으면 파일 이름을 제목으로
             source_label=f"{info.get('source', '제주데이터허브 공개 데이터')}, 파일 {path.name}",
         )
-        res["file"] = str(path.relative_to(DATA_DIR))
+        res["file"] = rel
         if "error" in res:  # 어느 파일에서 난 오류인지 알 수 있게 파일 이름을 앞에 붙임
-            res["error"] = f"{res['file']}: {res['error']}"
+            res["error"] = f"{rel}: {res['error']}"
+        else:  # 어느 파일에서 온 표인지 표 보관소에도 적어 둠 (다음 파일과 겹치는지 확인할 때 씀)
+            TABLES[name].update(file=rel, stem=path.stem)
+            loaded_files.add(rel)
+            stems[path.stem] = rel
         results.append(res)
     return results
 
@@ -210,12 +235,13 @@ def ensure_builtin_tables(rescan: bool = False) -> list[dict]:
       표시도 함께 None으로 돌아가므로 자동으로 다시 읽는다. (둘의 수명이 같아짐)
     """
     global _builtin_results
-    if _builtin_results is None or rescan:
-        found = dict(_builtin_results or {})
-        for res in load_builtin_tables():
-            found[res["file"]] = res  # 같은 파일을 다시 시도했으면 새 결과로 바꿈
-        _builtin_results = found
-    return list(_builtin_results.values())
+    with _load_lock:  # 이 안은 한 번에 한 접속만 실행 (먼저 들어간 쪽이 끝나야 다음이 들어감)
+        if _builtin_results is None or rescan:  # 검사도 잠금 '안'에서 해야 함
+            found = dict(_builtin_results or {})
+            for res in load_builtin_tables():
+                found[res["file"]] = res  # 같은 파일을 다시 시도했으면 새 결과로 바꿈
+            _builtin_results = found
+        return list(_builtin_results.values())
 
 
 def get_result(result_id: str) -> pd.DataFrame | None:
