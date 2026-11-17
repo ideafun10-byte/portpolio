@@ -1,8 +1,8 @@
 """
 app.py — 화면 담당 (계산은 tools.py, 판단은 agent.py에 맡김)
 
-실행:  streamlit run code/app.py
-
+실행:  
+streamlit run code/app.py
 화면 구성
   왼쪽(사이드바): ① API 키·모델 이름  ② 데이터 목록 + CSV 올리기
   가운데: 데이터 소개(LLM 안 씀) → 예시 질문 버튼 → 대화(답·그래프·표·계산 과정)
