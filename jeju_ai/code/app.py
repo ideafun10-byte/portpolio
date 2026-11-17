@@ -141,7 +141,7 @@ def render_assistant(msg: dict, idx: int) -> None:
     usage_line = f"LLM 호출 {u['calls']}회 · 토큰 {u['total_tokens']:,}개 (입력 {u['prompt_tokens']:,} / 출력 {u['output_tokens']:,})"
     # [수정 2] 도구를 하나도 안 쓴 답(인사·안내·거절)에는 '계산 과정' 상자를 그리지 않는다 (보여 줄 과정이 없으므로)
     if not msg["steps"]:
-        st.caption(usage_line if u["calls"] else "미리 준비된 안내입니다 (LLM 호출 0회)")
+        st.caption(usage_line if u["calls"] else "제주 ai")
         return
     with st.expander("계산 과정 보기"):
         for i, s in enumerate(msg["steps"], 1):
@@ -185,25 +185,7 @@ def render_intro(name: str) -> None:
 # 사이드바: 설정 + 데이터
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    st.header("1. 설정")
-    # [수정 1] 두 칸 모두 '비워 두면 .env 값을 쓴다'로 통일하고, 실제로 어떤 값이 쓰이는지 바로 아래에 보여 준다.
-    # [학습 포인트] value=는 칸에 '실제로 들어 있는 글자', placeholder=는 칸이 비었을 때 흐리게 보이는 '안내 글자'.
-    #   기본 모델을 value로 넣으면 그 글자가 '화면 입력'으로 취급돼 .env를 고쳐도 옛 값이 계속 쓰인다.
-    #   그래서 placeholder로만 보여 주고, 칸이 비어 있으면 agent가 .env → 기본값 순서로 찾게 한다.
-    # type="password" → 화면에 ●●●로 보임. 입력한 키는 이 탭의 메모리에만 있고 파일로 저장하지 않는다.
-    key_input = st.text_input("API 키 (원하는 모델)", type="password", placeholder="비워 두면 GEMIMI_KEY 사용합니다",
-                              help="여기에 입력하면 연결된 모델보다 우선해서 사용됩니다 ")
-    model_input = st.text_input("모델 이름", placeholder=f"비워 두면 {settings_status()['model']}",
-                                help="비워 두면 .env의 GEMINI_MODEL, 그것도 없으면 기본 모델을 씁니다.")
-    status = settings_status(key_input, model_input)  # 화면 입력까지 반영한 '실제로 쓰일 설정'
-    if status["has_key"]:
-        st.caption(f"API 키: {status['key_source']}의 키 사용 중  \n모델: {status['model']} ({status['model_source']})")
-    else:
-        st.warning("API 키가 없습니다. 위 칸에 API 키를 입력해주세요.")
-    if status["key_problem"]:
-        st.caption(f"알림: {status['key_problem']}")
-
-    st.header("2. 데이터")
+    st.header("1. 데이터")
     # [수정 3-나] 앱을 켠 뒤에 data 폴더에 파일을 넣은 경우를 위해 '다시 읽기' 버튼을 둔다 (새 파일만 추가로 읽음)
     if st.button("data 폴더 다시 읽기", help="앱을 켠 뒤에 data 폴더에 CSV를 넣었다면 눌러 주세요"):
         builtin_results = ensure_builtin_tables(rescan=True)
@@ -239,13 +221,32 @@ with st.sidebar:
             index=names.index(st.session_state.focus_table) if st.session_state.focus_table in names else 0,
             format_func=lambda n: TABLES[n]["title"],
         )
+    st.header("2. 설정")
+        # [수정 1] 두 칸 모두 '비워 두면 .env 값을 쓴다'로 통일하고, 실제로 어떤 값이 쓰이는지 바로 아래에 보여 준다.
+        # [학습 포인트] value=는 칸에 '실제로 들어 있는 글자', placeholder=는 칸이 비었을 때 흐리게 보이는 '안내 글자'.
+        #   기본 모델을 value로 넣으면 그 글자가 '화면 입력'으로 취급돼 .env를 고쳐도 옛 값이 계속 쓰인다.
+        #   그래서 placeholder로만 보여 주고, 칸이 비어 있으면 agent가 .env → 기본값 순서로 찾게 한다.
+        # type="password" → 화면에 ●●●로 보임. 입력한 키는 이 탭의 메모리에만 있고 파일로 저장하지 않는다.
+    key_input = st.text_input("API 키 (원하는 모델)", type="password", placeholder="비워 두면 연결된 KEY 사용합니다",
+                                  help="여기에 입력하면 연결된 모델보다 우선해서 사용됩니다 ")
+    model_input = st.text_input("모델 이름", placeholder=f"비워 두면 {settings_status()['model']}",
+                                    help="비워 두면 기본 모델을 씁니다.")
+    status = settings_status(key_input, model_input)  # 화면 입력까지 반영한 '실제로 쓰일 설정'
+    if status["has_key"]:
+        st.caption(f"API 키: {status['key_source']}의 키 사용 중  \n모델: {status['model']} ({status['model_source']})")
+    else:
+        st.warning("API 키가 없습니다. 위 칸에 API 키를 입력해주세요.")
+    if status["key_problem"]:
+        st.caption(f"알림: {status['key_problem']}")
+    
 
 
 # ---------------------------------------------------------------------------
 # 가운데: 데이터 소개 → 예시 질문 → 대화
 # ---------------------------------------------------------------------------
 st.title("제주 데이터 분석 도우미")
-st.caption("CSV를 올리고 일상어로 물어보면, 계산해서 그래프·표·설명으로 답합니다. 데이터로 알 수 없는 질문은 알려 드립니다.")
+st.caption("CSV를 올리시거나 기존 csv로 물어보면, 계산해서 그래프·표·설명으로 답합니다. \n" 
+"주어진 데이터로 알 수 있는 정보만 넘깁니다 ")
 
 pending = None  # 예시 버튼을 누르면 여기에 질문이 담김
 focus = st.session_state.focus_table
@@ -268,7 +269,7 @@ for i, msg in enumerate(st.session_state.messages):
             render_assistant(msg, i)
 
 # 새 질문 (입력창 또는 예시 버튼)
-question = st.chat_input("예: 2024년 카드 이용 금액이 가장 큰 업종 5개는?") or pending
+question = st.chat_input("예시 질문 : 2024년 카드 이용 금액이 가장 큰 업종 5개는?") or pending
 if question:
     st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
@@ -281,3 +282,5 @@ if question:
         msg = {"role": "assistant", **result}
         render_assistant(msg, len(st.session_state.messages))
     st.session_state.messages.append(msg)
+
+

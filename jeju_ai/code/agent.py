@@ -158,11 +158,6 @@ def classify_small_talk(question: str) -> str | None:
     """인사·감사·작별·소개 요청·빈 말 중 하나면 그 종류를, 데이터 질문일 수 있으면 None을 돌려준다."""
     t = _simplify(question)
     if not t:
-        # 한글·영문·숫자가 하나도 남지 않은 입력.
-        # [수정 11/16-2] 한자·일본어처럼 다른 글자로 쓴 '질문'일 수 있으므로, 글자가 아예 없을 때만 빈말로 본다.
-        #   "ㅋㅋㅋ", "...", "?"  → 글자 없음 → 빈말
-        #   "销售额最高的行业?"    → 글자 있음 → None (LLM에게 넘김)
-        # str.isalpha(): 그 글자가 '어느 나라 글자든 글자인가'를 알려 준다 (문장부호·이모지는 False)
         rest = re.sub(r"[ㅋㅎㅠㅜ]", "", str(question))
         return None if any(ch.isalpha() or ch.isdigit() for ch in rest) else "빈말"
     for kind, pattern in _SMALL_TALK:

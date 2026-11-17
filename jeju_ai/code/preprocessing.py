@@ -145,7 +145,7 @@ def _date_candidates(columns : list[str]) -> list[str]:
         elif len(pieces) >= 2 and pieces[-1] in DATE_LAST_PIECE:
             #조각 단위로 나누어서 비교
 
-            priority = 1 if low.startswith("base") else 2  #low가 base로 시작하면 1점 아니면 2점
+            priority = 1 if low.startswith("base_") else 2  #low가 base로 시작하면 1점 아니면 2점
 
         elif any(k in col for k in DATE_KO_CONTAINS):
             priority = 2
@@ -201,7 +201,7 @@ def _add_date_columns(df: pd.DataFrame, col: str, fmt: str, unit: str ,report : 
             report["warnings"].append(f"'{name}' 컬럼이 이미 있어서 날짜에서 만들지 않았습니다")
             continue
         df[name] = series
-    report["data"] = {"column" : col,"format" : fmt,"unit": unit,"method" : "규칙",
+    report["date"] = {"column" : col,"format" : fmt,"unit": unit,"method" : "규칙",
                       "failed_values": int(parsed.isna().sum()- df[col].isna().sum())}
 
     return df
@@ -213,7 +213,7 @@ def _to_numeric_if_possible(col : pd.Series) ->pd.Series | None:
     nonempty = col.dropna()
     if nonempty.empty:
         return None
-    converted = pd.to_datetime(col.str.replace(",","",regex= False),errors = "coerce")
+    converted = pd.to_numeric(col.str.replace(",","",regex= False),errors = "coerce")
     ratio = converted.notna().sum() / len(nonempty)
 
     if ratio < NUMERIC_PASS_RATIO:
@@ -256,14 +256,14 @@ def clean_table(df : pd. DataFrame) -> tuple[pd.DataFrame,dict]:
 
         # 숫자 변환 
 
-        skip = {report["date"]["column"]} if report["date"] else set()
-        for col in df.columns:
-            if col in skip or pd.api.types.is_numeric_dtype(df[col]):
-                continue
-            num = _to_numeric_if_possible(df[col])
-            if num is not None:
-                df[col] = num
-                report["numeric_columns"].append(col)
+    skip = {report["date"]["column"]} if report["date"] else set()
+    for col in df.columns:
+        if col in skip or pd.api.types.is_numeric_dtype(df[col]):
+            continue
+        num = _to_numeric_if_possible(df[col])
+        if num is not None:
+            df[col] = num
+            report["numeric_columns"].append(col)
 
 
     return df,report
